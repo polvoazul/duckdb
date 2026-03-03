@@ -5,6 +5,7 @@
 #include "duckdb/main/config.hpp"
 #include "duckdb/main/extension_helper.hpp"
 #include "duckdb/parser/query_node/select_node.hpp"
+#include "duckdb/parser/constraints/unique_constraint.hpp"
 #include "duckdb/parser/statement/select_statement.hpp"
 #include "duckdb/parser/tableref/basetableref.hpp"
 #include "duckdb/parser/tableref/subqueryref.hpp"
@@ -136,13 +137,21 @@ BoundStatement Binder::Bind(BaseTableRef &ref) {
 		auto alias = ref.alias.empty() ? ref.table_name : ref.alias;
 		auto names = BindContext::AliasColumnNames(alias, ctebinding->GetColumnNames(), ref.column_name_alias);
 
-		bind_context.AddGenericBinding(index, alias, names, ctebinding->GetColumnTypes());
+		bind_context.AddGenericBinding(index, alias, names, ctebinding->GetColumnTypes(), ctebinding->GetUniqueKeys());
 
 		bool is_recurring = ref.schema_name == "recurring";
 
 		BoundStatement result;
 		result.types = ctebinding->GetColumnTypes();
 		result.names = names;
+		for (auto &key : ctebinding->GetUniqueKeys()) {
+			vector<idx_t> converted_key;
+			converted_key.reserve(key.size());
+			for (auto key_idx : key) {
+				converted_key.push_back(static_cast<idx_t>(key_idx));
+			}
+			result.unique_keys.push_back(std::move(converted_key));
+		}
 		result.plan =
 		    make_uniq<LogicalCTERef>(index, ctebinding->GetIndex(), result.types, std::move(names), is_recurring);
 		return result;
@@ -271,6 +280,24 @@ BoundStatement Binder::Bind(BaseTableRef &ref) {
 		BoundStatement result;
 		result.types = table_types;
 		result.names = table_names;
+		for (auto &constraint : table.GetConstraints()) {
+			if (constraint->type != ConstraintType::UNIQUE) {
+				continue;
+			}
+			auto &unique = constraint->Cast<UniqueConstraint>();
+			vector<LogicalIndex> constraint_indices;
+			if (unique.HasIndex()) {
+				constraint_indices.push_back(unique.GetIndex());
+			} else {
+				constraint_indices = unique.GetLogicalIndexes(table.GetColumns());
+			}
+			vector<idx_t> key;
+			key.reserve(constraint_indices.size());
+			for (auto &constraint_idx : constraint_indices) {
+				key.push_back(constraint_idx.index);
+			}
+			result.unique_keys.push_back(std::move(key));
+		}
 		result.plan = std::move(logical_get);
 		return result;
 	}

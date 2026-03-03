@@ -109,6 +109,12 @@
       },
       {
         "id": 208,
+        "name": "is_unique",
+        "type": "bool",
+        "default": "false"
+      },
+      {
+        "id": 209,
         "name": "is_implicit",
         "type": "bool",
         "default": "true",

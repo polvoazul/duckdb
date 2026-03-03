@@ -90,6 +90,15 @@ void CTEBindState::Bind(CTEBinding &binding) {
 
 	// the result types of the CTE are the types of the LHS
 	types = query.types;
+	unique_keys.clear();
+	for (auto &key : query.unique_keys) {
+		vector<column_t> converted_key;
+		converted_key.reserve(key.size());
+		for (auto key_idx : key) {
+			converted_key.push_back(static_cast<column_t>(key_idx));
+		}
+		unique_keys.push_back(std::move(converted_key));
+	}
 	// names are picked from the LHS, unless aliases are explicitly specified
 	names = query.names;
 	for (idx_t i = 0; i < aliases.size() && i < names.size(); i++) {
@@ -140,6 +149,7 @@ BoundStatement Binder::FinishCTE(BoundCTEData &bound_cte, BoundStatement child) 
 	// the result types of the CTE are the types of the LHS
 	result.types = child.types;
 	result.names = child.names;
+	result.unique_keys = child.unique_keys;
 
 	MoveCorrelatedExpressions(*bound_cte.child_binder);
 	MoveCorrelatedExpressions(*bind_state.query_binder);

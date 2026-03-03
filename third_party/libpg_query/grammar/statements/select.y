@@ -1402,21 +1402,21 @@ joined_table:
 					n->location = @2;
 					$$ = n;
 				}
-            | table_ref ANTI JOIN table_ref join_qual
-                {
-                    /* ANTI JOIN is a filter */
-                    PGJoinExpr *n = makeNode(PGJoinExpr);
-                    n->jointype = PG_JOIN_ANTI;
-                    n->joinreftype = PG_JOIN_REGULAR;
-                    n->larg = $1;
-                    n->rarg = $4;
-                    if ($5 != NULL && IsA($5, PGList))
-                        n->usingClause = (PGList *) $5; /* USING clause */
-                    else
-                        n->quals = $5; /* ON clause */
-                    n->location = @2;
-                    $$ = n;
-                }
+			| table_ref ANTI JOIN table_ref join_qual
+				{
+					/* ANTI JOIN is a filter */
+					PGJoinExpr *n = makeNode(PGJoinExpr);
+					n->jointype = PG_JOIN_ANTI;
+					n->joinreftype = PG_JOIN_REGULAR;
+					n->larg = $1;
+					n->rarg = $4;
+					if ($5 != NULL && IsA($5, PGList))
+						n->usingClause = (PGList *) $5; /* USING clause */
+					else
+						n->quals = $5; /* ON clause */
+					n->location = @2;
+					$$ = n;
+				}
            | table_ref SEMI JOIN table_ref join_qual
                {
                    /* SEMI JOIN is also a filter */
@@ -1430,9 +1430,94 @@ joined_table:
                    else
                        n->quals = $5; /* ON clause */
                    n->location = @2;
-                   n->location = @2;
                    $$ = n;
                }
+			| table_ref UNIQUE join_type JOIN table_ref join_qual
+				{
+					PGJoinExpr *n = makeNode(PGJoinExpr);
+					n->jointype = $3;
+					n->joinreftype = PG_JOIN_REGULAR;
+					n->larg = $1;
+					n->rarg = $5;
+					if ($6 != NULL && IsA($6, PGList))
+						n->usingClause = (PGList *) $6; /* USING clause */
+					else
+						n->quals = $6; /* ON clause */
+					n->is_unique = true;
+					n->location = @2;
+					$$ = n;
+				}
+			| table_ref UNIQUE JOIN table_ref join_qual
+				{
+					PGJoinExpr *n = makeNode(PGJoinExpr);
+					n->jointype = PG_JOIN_INNER;
+					n->joinreftype = PG_JOIN_REGULAR;
+					n->larg = $1;
+					n->rarg = $4;
+					if ($5 != NULL && IsA($5, PGList))
+						n->usingClause = (PGList *) $5; /* USING clause */
+					else
+						n->quals = $5; /* ON clause */
+					n->is_unique = true;
+					n->location = @2;
+					$$ = n;
+				}
+			| table_ref NATURAL UNIQUE join_type JOIN table_ref
+				{
+					PGJoinExpr *n = makeNode(PGJoinExpr);
+					n->jointype = $4;
+					n->joinreftype = PG_JOIN_NATURAL;
+					n->larg = $1;
+					n->rarg = $6;
+					n->usingClause = NIL; /* figure out which columns later... */
+					n->quals = NULL; /* fill later */
+					n->is_unique = true;
+					n->location = @2;
+					$$ = n;
+				}
+			| table_ref NATURAL UNIQUE JOIN table_ref
+				{
+					PGJoinExpr *n = makeNode(PGJoinExpr);
+					n->jointype = PG_JOIN_INNER;
+					n->joinreftype = PG_JOIN_NATURAL;
+					n->larg = $1;
+					n->rarg = $5;
+					n->usingClause = NIL; /* figure out which columns later... */
+					n->quals = NULL; /* fill later */
+					n->is_unique = true;
+					n->location = @2;
+					$$ = n;
+				}
+			| table_ref ASOF UNIQUE join_type JOIN table_ref join_qual
+				{
+					PGJoinExpr *n = makeNode(PGJoinExpr);
+					n->jointype = $4;
+					n->joinreftype = PG_JOIN_ASOF;
+					n->larg = $1;
+					n->rarg = $6;
+					if ($7 != NULL && IsA($7, PGList))
+						n->usingClause = (PGList *) $7; /* USING clause */
+					else
+						n->quals = $7; /* ON clause */
+					n->is_unique = true;
+					n->location = @2;
+					$$ = n;
+				}
+			| table_ref ASOF UNIQUE JOIN table_ref join_qual
+				{
+					PGJoinExpr *n = makeNode(PGJoinExpr);
+					n->jointype = PG_JOIN_INNER;
+					n->joinreftype = PG_JOIN_ASOF;
+					n->larg = $1;
+					n->rarg = $5;
+					if ($6 != NULL && IsA($6, PGList))
+						n->usingClause = (PGList *) $6; /* USING clause */
+					else
+						n->quals = $6; /* ON clause */
+					n->is_unique = true;
+					n->location = @2;
+					$$ = n;
+				}
 		;
 
 alias_clause:

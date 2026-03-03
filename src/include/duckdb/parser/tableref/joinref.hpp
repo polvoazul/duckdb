@@ -42,6 +42,7 @@ public:
 	vector<unique_ptr<ParsedExpression>> duplicate_eliminated_columns;
 	//! If we have duplicate eliminated columns if the delim is flipped
 	bool delim_flipped = false;
+	bool is_unique = false;
 	//! Whether or not this is an implicit cross join
 	bool is_implicit = false;
 

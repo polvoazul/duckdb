@@ -10,13 +10,22 @@ string JoinRef::ToString() const {
 	result = left->ToString() + " ";
 	switch (ref_type) {
 	case JoinRefType::REGULAR:
+		if (is_unique) {
+			result += "UNIQUE ";
+		}
 		result += EnumUtil::ToString(type) + " JOIN ";
 		break;
 	case JoinRefType::NATURAL:
 		result += "NATURAL ";
+		if (is_unique) {
+			result += "UNIQUE ";
+		}
 		result += EnumUtil::ToString(type) + " JOIN ";
 		break;
 	case JoinRefType::ASOF:
+		if (is_unique) {
+			result += "UNIQUE ";
+		}
 		result += "ASOF ";
 		result += EnumUtil::ToString(type) + " JOIN ";
 		break;
@@ -63,7 +72,7 @@ bool JoinRef::Equals(const TableRef &other_p) const {
 		}
 	}
 	return left->Equals(*other.left) && right->Equals(*other.right) &&
-	       ParsedExpression::Equals(condition, other.condition) && type == other.type;
+	       ParsedExpression::Equals(condition, other.condition) && type == other.type && is_unique == other.is_unique;
 }
 
 unique_ptr<TableRef> JoinRef::Copy() {
@@ -78,6 +87,7 @@ unique_ptr<TableRef> JoinRef::Copy() {
 	copy->alias = alias;
 	copy->using_columns = using_columns;
 	copy->delim_flipped = delim_flipped;
+	copy->is_unique = is_unique;
 	for (auto &col : duplicate_eliminated_columns) {
 		copy->duplicate_eliminated_columns.emplace_back(col->Copy());
 	}

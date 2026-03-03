@@ -113,7 +113,7 @@ public:
 	                     const vector<LogicalType> &types, StandardEntry &entry);
 	//! Adds a base table with the given alias to the BindContext.
 	void AddGenericBinding(idx_t index, const string &alias, const vector<string> &names,
-	                       const vector<LogicalType> &types);
+	                       const vector<LogicalType> &types, const vector<vector<column_t>> &unique_keys = {});
 
 	//! Adds a base table with the given alias to the CTE BindContext.
 	//! We need this to correctly bind recursive CTEs with multiple references.

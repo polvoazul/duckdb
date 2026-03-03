@@ -74,7 +74,7 @@ typedef struct PGRangeVar {
 	char *schemaname;    /* the schema name, or NULL */
 	char *relname;       /* the relation/sequence name */
 	bool inh;            /* expand rel by inheritance? recursively act
-								 * on children? */
+	                      * on children? */
 	char relpersistence; /* see RELPERSISTENCE_* in pg_class.h */
 	PGNode *at_clause;   /* version of the table to read */
 	PGAlias *alias;      /* table alias & optional column aliases */
@@ -116,8 +116,8 @@ typedef struct PGIntoClause {
 	PGRangeVar *rel;           /* target relation name */
 	PGList *colNames;          /* column names to assign, or NIL */
 	PGList *options;           /* options from WITH clause */
-	PGList *partition_list;		/* e.g. expression list for partitioned by */
-	PGList *sort_list;			/* e.g. expression list for sort by */
+	PGList *partition_list;    /* e.g. expression list for partitioned by */
+	PGList *sort_list;         /* e.g. expression list for sort by */
 	PGOnCommitAction onCommit; /* what do we do at COMMIT? */
 	char *tableSpaceName;      /* table space to use, or NULL */
 	PGNode *viewQuery;         /* materialized view's SELECT query */
@@ -170,15 +170,15 @@ typedef struct PGExpr {
 typedef struct PGVar {
 	PGExpr xpr;
 	PGIndex varno;          /* index of this var's relation in the range
-								 * table, or INNER_VAR/OUTER_VAR/INDEX_VAR */
+	                         * table, or INNER_VAR/OUTER_VAR/INDEX_VAR */
 	PGAttrNumber varattno;  /* attribute number of this var, or zero for
-								 * all */
+	                         * all */
 	PGOid vartype;          /* pg_type OID for the type of this var */
 	int32_t vartypmod;      /* pg_attribute typmod value */
 	PGOid varcollid;        /* OID of collation, or InvalidOid if none */
 	PGIndex varlevelsup;    /* for subquery variables referencing outer
-								 * relations; 0 in a normal var, >0 means N
-								 * levels up */
+	                         * relations; 0 in a normal var, >0 means N
+	                         * levels up */
 	PGIndex varnoold;       /* original value of varno, for debugging */
 	PGAttrNumber varoattno; /* original value of varattno */
 	int location;           /* token location, or -1 if unknown */
@@ -200,11 +200,11 @@ typedef struct PGConst {
 	int constlen;        /* typlen of the constant's datatype */
 	PGDatum constvalue;  /* the constant's value */
 	bool constisnull;    /* whether the constant is null (if true,
-								 * constvalue is undefined) */
+	                      * constvalue is undefined) */
 	bool constbyval;     /* whether this datatype is passed by value.
-								 * If true, then all the information is stored
-								 * in the Datum. If false, then the PGDatum
-								 * contains a pointer to the information. */
+	                      * If true, then all the information is stored
+	                      * in the Datum. If false, then the PGDatum
+	                      * contains a pointer to the information. */
 	int location;        /* token location, or -1 if unknown */
 } PGConst;
 
@@ -301,7 +301,7 @@ typedef struct PGAggref {
 	PGExpr *aggfilter;     /* FILTER expression, if any */
 	bool aggstar;          /* true if argument list was really '*' */
 	bool aggvariadic;      /* true if variadic arguments have been
-								 * combined into an array last argument */
+	                        * combined into an array last argument */
 	char aggkind;          /* aggregate kind (see pg_aggregate.h) */
 	PGIndex agglevelsup;   /* > 0 if agg belongs to outer query */
 	PGAggSplit aggsplit;   /* expected agg-splitting mode of parent PGAgg */
@@ -335,7 +335,7 @@ typedef struct PGAggref {
 typedef struct PGGroupingFunc {
 	PGExpr xpr;
 	PGList *args;        /* arguments, not evaluated but kept for
-								 * benefit of EXPLAIN etc. */
+	                      * benefit of EXPLAIN etc. */
 	PGList *refs;        /* ressortgrouprefs of arguments */
 	PGList *cols;        /* actual column positions set by planner */
 	PGIndex agglevelsup; /* same as Aggref.agglevelsup */
@@ -395,14 +395,14 @@ typedef struct PGArrayRef {
 	int32_t reftypmod;       /* typmod of the array (and elements too) */
 	PGOid refcollid;         /* OID of collation, or InvalidOid if none */
 	PGList *refupperindexpr; /* expressions that evaluate to upper
-									 * array indexes */
+	                          * array indexes */
 	PGList *reflowerindexpr; /* expressions that evaluate to lower
-									 * array indexes, or NIL for single array
-									 * element */
+	                          * array indexes, or NIL for single array
+	                          * element */
 	PGExpr *refexpr;         /* the expression that evaluates to an array
-								 * value */
+	                          * value */
 	PGExpr *refassgnexpr;    /* expression for the source value, or NULL if
-								 * fetch */
+	                          * fetch */
 } PGArrayRef;
 
 /*
@@ -441,7 +441,7 @@ typedef struct PGFuncExpr {
 	PGOid funcresulttype;      /* PG_TYPE OID of result value */
 	bool funcretset;           /* true if function returns set */
 	bool funcvariadic;         /* true if variadic arguments have been
-								 * combined into an array last argument */
+	                            * combined into an array last argument */
 	PGCoercionForm funcformat; /* how to display this function call */
 	PGOid funccollid;          /* OID of collation of result */
 	PGOid inputcollid;         /* OID of collation that function should use */
@@ -673,19 +673,19 @@ typedef struct PGSubPlan {
 	PGOid firstColType;      /* Type of first column of subplan result */
 	int32_t firstColTypmod;  /* Typmod of first column of subplan result */
 	PGOid firstColCollation; /* Collation of first column of subplan
-									 * result */
+	                          * result */
 	/* Information about execution strategy: */
 	bool useHashTable;   /* true to store subselect output in a hash
-								 * table (implies we are doing "IN") */
+	                      * table (implies we are doing "IN") */
 	bool unknownEqFalse; /* true if it's okay to return false when the
-								 * spec result is UNKNOWN; this allows much
-								 * simpler handling of null values */
+	                      * spec result is UNKNOWN; this allows much
+	                      * simpler handling of null values */
 	bool parallel_safe;  /* is the subplan parallel-safe? */
 	/* Note: parallel_safe does not consider contents of testexpr or args */
 	/* Information for passing params into and out of the subselect: */
 	/* setParam and parParam are lists of integers (param IDs) */
 	PGList *setParam; /* initplan subqueries have to set these
-								 * Params for parent plan */
+	                   * Params for parent plan */
 	PGList *parParam; /* indices of input Params from parent plan */
 	PGList *args;     /* exprs to pass as parParam values */
 	/* Estimated execution costs: */
@@ -720,7 +720,7 @@ typedef struct PGFieldSelect {
 	PGExpr *arg;           /* input expression */
 	PGAttrNumber fieldnum; /* attribute number of field to extract */
 	PGOid resulttype;      /* type of the field (result type of this
-								 * node) */
+	                        * node) */
 	int32_t resulttypmod;  /* output typmod (usually -1) */
 	PGOid resultcollid;    /* OID of collation of the field */
 } PGFieldSelect;
@@ -1275,11 +1275,11 @@ typedef struct PGTargetEntry {
 	PGAttrNumber resno;      /* attribute number (see notes above) */
 	char *resname;           /* name of the column (could be NULL) */
 	PGIndex ressortgroupref; /* nonzero if referenced by a sort/group
-									 * clause */
+	                          * clause */
 	PGOid resorigtbl;        /* OID of column's source table */
 	PGAttrNumber resorigcol; /* column's number in source table */
 	bool resjunk;            /* set to true to eliminate the attribute from
-								 * final target list */
+	                          * final target list */
 } PGTargetEntry;
 
 /* ----------------------------------------------------------------
@@ -1349,15 +1349,16 @@ typedef struct PGRangeTblRef {
  */
 typedef struct PGJoinExpr {
 	PGNodeTag type;
-	PGJoinType jointype; /* type of join */
+	PGJoinType jointype;       /* type of join */
 	PGJoinRefType joinreftype; /* Regular/Natural/AsOf join? Will need to shape table */
-	PGNode *larg;        /* left subtree */
-	PGNode *rarg;        /* right subtree */
-	PGList *usingClause; /* USING clause, if any (list of String) */
-	PGNode *quals;       /* qualifiers on join, if any */
-	PGAlias *alias;      /* user-written alias clause, if any */
-	int rtindex;         /* RT index assigned for join, or 0 */
-	int location;          /* token location, or -1 if unknown */
+	PGNode *larg;              /* left subtree */
+	PGNode *rarg;              /* right subtree */
+	PGList *usingClause;       /* USING clause, if any (list of String) */
+	PGNode *quals;             /* qualifiers on join, if any */
+	PGAlias *alias;            /* user-written alias clause, if any */
+	bool is_unique;            /* UNIQUE JOIN assertion */
+	int rtindex;               /* RT index assigned for join, or 0 */
+	int location;              /* token location, or -1 if unknown */
 } PGJoinExpr;
 
 /*----------
@@ -1390,7 +1391,7 @@ typedef struct PGOnConflictExpr {
 
 	/* Arbiter */
 	PGList *arbiterElems; /* unique index arbiter list (of
-								 * InferenceElem's) */
+	                       * InferenceElem's) */
 	PGNode *arbiterWhere; /* unique index arbiter WHERE clause */
 	PGOid constraint;     /* pg_constraint OID for arbiter */
 
@@ -1401,14 +1402,13 @@ typedef struct PGOnConflictExpr {
 	PGList *exclRelTlist;    /* tlist of the EXCLUDED pseudo relation */
 } PGOnConflictExpr;
 
-
 /*
  * PGAtClause - AT clause in FROM tables - e.g. "AT (TIMESTAMP => NOW())
  */
 typedef struct PGAtClause {
 	PGNodeTag type;
-	const char *unit;   /* the unit (e.g. TIMESTAMP/VERSION) */
-	PGNode *expr;       /* the expression */
+	const char *unit; /* the unit (e.g. TIMESTAMP/VERSION) */
+	PGNode *expr;     /* the expression */
 } PGAtClause;
 
-}
+} // namespace duckdb_libpgquery

@@ -18,8 +18,10 @@
 #include "duckdb/parser/tableref/joinref.hpp"
 #include "duckdb/planner/binder.hpp"
 #include "duckdb/planner/expression/bound_aggregate_expression.hpp"
+#include "duckdb/planner/expression/bound_cast_expression.hpp"
 #include "duckdb/planner/expression/bound_constant_expression.hpp"
 #include "duckdb/planner/expression/bound_expanded_expression.hpp"
+#include "duckdb/planner/expression/bound_columnref_expression.hpp"
 #include "duckdb/planner/expression_binder/column_alias_binder.hpp"
 #include "duckdb/planner/expression_binder/constant_binder.hpp"
 #include "duckdb/planner/expression_binder/group_binder.hpp"
@@ -32,6 +34,134 @@
 #include "duckdb/planner/query_node/bound_select_node.hpp"
 
 namespace duckdb {
+
+static void AddInferredUniqueKey(vector<vector<idx_t>> &unique_keys, vector<idx_t> key) {
+	if (key.empty()) {
+		return;
+	}
+	sort(key.begin(), key.end());
+	key.erase(std::unique(key.begin(), key.end()), key.end());
+	for (auto &existing : unique_keys) {
+		if (existing == key) {
+			return;
+		}
+	}
+	unique_keys.push_back(std::move(key));
+}
+
+static bool TryGetDirectColumnRef(Expression &expr, idx_t &table_index, idx_t &column_index) {
+	auto *current = &expr;
+	while (current->GetExpressionClass() == ExpressionClass::BOUND_CAST) {
+		current = current->Cast<BoundCastExpression>().child.get();
+	}
+	if (current->GetExpressionType() != ExpressionType::BOUND_COLUMN_REF) {
+		return false;
+	}
+	auto &colref = current->Cast<BoundColumnRefExpression>();
+	table_index = colref.binding.table_index;
+	column_index = colref.binding.column_index;
+	return true;
+}
+
+static void InferDistinctUniqueKey(const BoundSelectNode &node, BoundStatement &result_statement) {
+	for (auto &modifier : node.modifiers) {
+		if (modifier->type != ResultModifierType::DISTINCT_MODIFIER) {
+			continue;
+		}
+		auto &distinct = modifier->Cast<BoundDistinctModifier>();
+		if (distinct.distinct_type != DistinctType::DISTINCT) {
+			continue;
+		}
+		vector<idx_t> key;
+		key.reserve(result_statement.names.size());
+		for (idx_t col_idx = 0; col_idx < result_statement.names.size(); col_idx++) {
+			key.push_back(col_idx);
+		}
+		AddInferredUniqueKey(result_statement.unique_keys, std::move(key));
+		return;
+	}
+}
+
+static void InferGroupByUniqueKey(const BoundSelectNode &node, BoundStatement &result_statement) {
+	if (node.groups.group_expressions.empty()) {
+		return;
+	}
+	vector<idx_t> group_indices;
+	if (node.groups.grouping_sets.empty()) {
+		group_indices.reserve(node.groups.group_expressions.size());
+		for (idx_t group_idx = 0; group_idx < node.groups.group_expressions.size(); group_idx++) {
+			group_indices.push_back(group_idx);
+		}
+	} else if (node.groups.grouping_sets.size() == 1 &&
+	           node.groups.grouping_sets[0].size() == node.groups.group_expressions.size()) {
+		for (auto group_idx : node.groups.grouping_sets[0]) {
+			group_indices.push_back(group_idx);
+		}
+	} else {
+		return;
+	}
+
+	unordered_map<idx_t, idx_t> group_to_output;
+	for (idx_t output_idx = 0; output_idx < node.column_count; output_idx++) {
+		auto &expr = *node.select_list[output_idx];
+		if (expr.GetExpressionType() != ExpressionType::BOUND_COLUMN_REF) {
+			continue;
+		}
+		auto &colref = expr.Cast<BoundColumnRefExpression>();
+		if (colref.binding.table_index != node.group_index) {
+			continue;
+		}
+		// group references point to the group expression index
+		group_to_output.emplace(colref.binding.column_index, output_idx);
+	}
+
+	vector<idx_t> key;
+	for (auto group_idx : group_indices) {
+		auto it = group_to_output.find(group_idx);
+		if (it == group_to_output.end()) {
+			return;
+		}
+		key.push_back(it->second);
+	}
+	AddInferredUniqueKey(result_statement.unique_keys, std::move(key));
+}
+
+static void InferProjectedUniqueKeys(const BoundSelectNode &node, BoundStatement &result_statement) {
+	if (node.from_table.unique_keys.empty()) {
+		return;
+	}
+	optional_idx source_table;
+	unordered_map<idx_t, idx_t> source_col_to_output;
+	for (idx_t output_idx = 0; output_idx < node.column_count; output_idx++) {
+		idx_t table_index;
+		idx_t column_index;
+		if (!TryGetDirectColumnRef(*node.select_list[output_idx], table_index, column_index)) {
+			continue;
+		}
+		if (!source_table.IsValid()) {
+			source_table = table_index;
+		} else if (source_table.GetIndex() != table_index) {
+			return;
+		}
+		// keep first projection index for duplicate projections
+		if (source_col_to_output.find(column_index) == source_col_to_output.end()) {
+			source_col_to_output[column_index] = output_idx;
+		}
+	}
+	for (auto &input_key : node.from_table.unique_keys) {
+		vector<idx_t> projected_key;
+		projected_key.reserve(input_key.size());
+		for (auto input_col : input_key) {
+			auto it = source_col_to_output.find(input_col);
+			if (it == source_col_to_output.end()) {
+				projected_key.clear();
+				break;
+			}
+			projected_key.push_back(it->second);
+		}
+		AddInferredUniqueKey(result_statement.unique_keys, std::move(projected_key));
+	}
+}
 
 unique_ptr<Expression> Binder::BindOrderExpression(OrderBinder &order_binder, unique_ptr<ParsedExpression> expr) {
 	// we treat the distinct list as an ORDER BY
@@ -701,6 +831,9 @@ BoundStatement Binder::BindSelectNode(SelectNode &statement, BoundStatement from
 	BoundStatement result_statement;
 	result_statement.types = result.types;
 	result_statement.names = result.names;
+	InferProjectedUniqueKeys(result, result_statement);
+	InferGroupByUniqueKey(result, result_statement);
+	InferDistinctUniqueKey(result, result_statement);
 	result_statement.plan = CreatePlan(result);
 	result_statement.extra_info.original_expressions = std::move(result.bind_state.original_expressions);
 	return result_statement;

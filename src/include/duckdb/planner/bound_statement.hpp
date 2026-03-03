@@ -11,6 +11,7 @@
 #include "duckdb/common/string.hpp"
 #include "duckdb/common/unique_ptr.hpp"
 #include "duckdb/common/vector.hpp"
+#include "duckdb/common/types.hpp"
 #include "duckdb/common/enums/set_operation_type.hpp"
 #include "duckdb/common/shared_ptr.hpp"
 
@@ -33,6 +34,8 @@ struct BoundStatement {
 	unique_ptr<LogicalOperator> plan;
 	vector<LogicalType> types;
 	vector<string> names;
+	//! Candidate unique keys over the output columns (0-based output indexes)
+	vector<vector<idx_t>> unique_keys;
 	ExtraBoundInfo extra_info;
 };
 

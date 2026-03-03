@@ -166,7 +166,7 @@
  * They wouldn't be given a precedence at all, were it not that we need
  * left-associativity among the JOIN rules themselves.
  */
-%left		JOIN CROSS LEFT FULL RIGHT INNER_P NATURAL POSITIONAL PIVOT UNPIVOT ANTI SEMI ASOF
+%left		JOIN CROSS LEFT FULL RIGHT INNER_P NATURAL POSITIONAL PIVOT UNPIVOT ANTI SEMI ASOF UNIQUE
 /* kluge to keep from causing shift/reduce conflicts */
 %right		PRESERVE STRIP_P IGNORE_P RESPECT_P
 

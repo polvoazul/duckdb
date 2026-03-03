@@ -703,7 +703,7 @@ vector<string> BindContext::AliasColumnNames(const string &table_name, const vec
 
 void BindContext::AddSubquery(idx_t index, const string &alias, SubqueryRef &ref, BoundStatement &subquery) {
 	auto names = AliasColumnNames(alias, subquery.names, ref.column_name_alias);
-	AddGenericBinding(index, alias, names, subquery.types);
+	AddGenericBinding(index, alias, names, subquery.types, subquery.unique_keys);
 }
 
 void BindContext::AddEntryBinding(idx_t index, const string &alias, const vector<string> &names,
@@ -714,17 +714,30 @@ void BindContext::AddEntryBinding(idx_t index, const string &alias, const vector
 void BindContext::AddView(idx_t index, const string &alias, SubqueryRef &ref, BoundStatement &subquery,
                           ViewCatalogEntry &view) {
 	auto names = AliasColumnNames(alias, subquery.names, ref.column_name_alias);
-	AddEntryBinding(index, alias, names, subquery.types, view.Cast<StandardEntry>());
+	auto binding = make_uniq<EntryBinding>(alias, subquery.types, names, index, view.Cast<StandardEntry>());
+	for (auto &key : subquery.unique_keys) {
+		vector<column_t> converted_key;
+		converted_key.reserve(key.size());
+		for (auto key_idx : key) {
+			converted_key.push_back(static_cast<column_t>(key_idx));
+		}
+		binding->AddUniqueKey(std::move(converted_key));
+	}
+	AddBinding(std::move(binding));
 }
 
 void BindContext::AddSubquery(idx_t index, const string &alias, TableFunctionRef &ref, BoundStatement &subquery) {
 	auto names = AliasColumnNames(alias, subquery.names, ref.column_name_alias);
-	AddGenericBinding(index, alias, names, subquery.types);
+	AddGenericBinding(index, alias, names, subquery.types, subquery.unique_keys);
 }
 
 void BindContext::AddGenericBinding(idx_t index, const string &alias, const vector<string> &names,
-                                    const vector<LogicalType> &types) {
-	AddBinding(make_uniq<Binding>(BindingType::BASE, BindingAlias(alias), types, names, index));
+                                    const vector<LogicalType> &types, const vector<vector<column_t>> &unique_keys) {
+	auto binding = make_uniq<Binding>(BindingType::BASE, BindingAlias(alias), types, names, index);
+	for (auto &key : unique_keys) {
+		binding->AddUniqueKey(key);
+	}
+	AddBinding(std::move(binding));
 }
 
 void BindContext::AddCTEBinding(unique_ptr<CTEBinding> binding) {

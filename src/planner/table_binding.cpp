@@ -10,6 +10,7 @@
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
 #include "duckdb/planner/expression/bound_lambdaref_expression.hpp"
 #include "duckdb/parser/parsed_expression_iterator.hpp"
+#include "duckdb/parser/constraints/unique_constraint.hpp"
 
 #include <algorithm>
 
@@ -54,12 +55,43 @@ const vector<string> &Binding::GetColumnNames() {
 	return names;
 }
 
+const vector<vector<column_t>> &Binding::GetUniqueKeys() const {
+	return unique_keys;
+}
+
 idx_t Binding::GetColumnCount() {
 	return GetColumnNames().size();
 }
 
 void Binding::SetColumnType(idx_t col_idx, LogicalType type_p) {
 	types[col_idx] = std::move(type_p);
+}
+
+void Binding::AddUniqueKey(vector<column_t> key) {
+	unique_keys.push_back(std::move(key));
+}
+
+bool Binding::ColumnsAreUnique(const vector<column_t> &column_indices) const {
+	for (auto &key : unique_keys) {
+		bool key_found = true;
+		for (auto &key_col : key) {
+			bool found = false;
+			for (auto &col : column_indices) {
+				if (col == key_col) {
+					found = true;
+					break;
+				}
+			}
+			if (!found) {
+				key_found = false;
+				break;
+			}
+		}
+		if (key_found) {
+			return true;
+		}
+	}
+	return false;
 }
 
 string Binding::GetAlias() const {
@@ -299,6 +331,47 @@ ErrorData TableBinding::ColumnNotFoundError(const string &column_name) const {
 	                                                           alias.GetAlias(), column_name, candidate_message));
 }
 
+bool TableBinding::ColumnsAreUnique(const vector<column_t> &column_indices) const {
+	if (Binding::ColumnsAreUnique(column_indices)) {
+		return true;
+	}
+	if (!entry || entry->type != CatalogType::TABLE_ENTRY) {
+		return false;
+	}
+	auto &table_entry = entry->Cast<TableCatalogEntry>();
+	for (auto &constraint : table_entry.GetConstraints()) {
+		if (constraint->type != ConstraintType::UNIQUE) {
+			continue;
+		}
+		auto &unique = constraint->Cast<UniqueConstraint>();
+		vector<LogicalIndex> constraint_indices;
+		if (unique.HasIndex()) {
+			constraint_indices.push_back(unique.GetIndex());
+		} else {
+			constraint_indices = unique.GetLogicalIndexes(table_entry.GetColumns());
+		}
+
+		bool all_found = true;
+		for (auto &idx : constraint_indices) {
+			bool found = false;
+			for (auto &col : column_indices) {
+				if (col == idx.index) {
+					found = true;
+					break;
+				}
+			}
+			if (!found) {
+				all_found = false;
+				break;
+			}
+		}
+		if (all_found) {
+			return true;
+		}
+	}
+	return false;
+}
+
 DummyBinding::DummyBinding(vector<LogicalType> types, vector<string> names, string dummy_name)
     : Binding(BindingType::DUMMY, BindingAlias(DummyBinding::DUMMY_NAME + dummy_name), std::move(types),
               std::move(names), DConstants::INVALID_INDEX),
@@ -366,6 +439,9 @@ void CTEBinding::Reference() {
 		// copy over the names / types and initialize the binding
 		this->names = bind_state->names;
 		this->types = bind_state->types;
+		for (auto &key : bind_state->unique_keys) {
+			AddUniqueKey(key);
+		}
 		Initialize();
 
 		// finalize binding

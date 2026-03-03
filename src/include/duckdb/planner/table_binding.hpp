@@ -51,8 +51,11 @@ public:
 	idx_t GetIndex();
 	const vector<LogicalType> &GetColumnTypes();
 	const vector<string> &GetColumnNames();
+	const vector<vector<column_t>> &GetUniqueKeys() const;
 	idx_t GetColumnCount();
 	void SetColumnType(idx_t col_idx, LogicalType type);
+	virtual bool ColumnsAreUnique(const vector<column_t> &column_indices) const;
+	void AddUniqueKey(vector<column_t> key);
 
 	static BindingAlias GetAlias(const string &explicit_alias, const StandardEntry &entry);
 	static BindingAlias GetAlias(const string &explicit_alias, optional_ptr<StandardEntry> entry);
@@ -90,6 +93,8 @@ protected:
 	vector<string> names;
 	//! Name -> index for the names
 	case_insensitive_map_t<column_t> name_map;
+	//! Sets of unique column indices
+	vector<vector<column_t>> unique_keys;
 };
 
 struct EntryBinding : public Binding {
@@ -130,6 +135,7 @@ public:
 	ErrorData ColumnNotFoundError(const string &column_name) const override;
 	// These are columns that are present in the name_map, appearing in the order that they're bound
 	const vector<ColumnIndex> &GetBoundColumnIds() const;
+	bool ColumnsAreUnique(const vector<column_t> &column_indices) const override;
 
 protected:
 	ColumnBinding GetColumnBinding(column_t column_index);
@@ -176,6 +182,7 @@ struct CTEBindState {
 	BoundStatement query;
 	vector<string> names;
 	vector<LogicalType> types;
+	vector<vector<column_t>> unique_keys;
 
 public:
 	bool IsBound() const;

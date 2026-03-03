@@ -11,6 +11,11 @@
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/case_insensitive_map.hpp"
 #include "duckdb/planner/expression_binder/lateral_binder.hpp"
+#include "duckdb/planner/expression/bound_cast_expression.hpp"
+#include "duckdb/planner/expression/bound_columnref_expression.hpp"
+#include "duckdb/planner/expression/bound_comparison_expression.hpp"
+#include "duckdb/planner/expression/bound_conjunction_expression.hpp"
+#include "duckdb/planner/joinside.hpp"
 #include "duckdb/planner/query_node/bound_select_node.hpp"
 
 namespace duckdb {
@@ -30,6 +35,72 @@ static unique_ptr<ParsedExpression> AddCondition(ClientContext &context, Binder 
 	auto left = BindColumn(left_binder, context, left_alias, column_name);
 	auto right = BindColumn(right_binder, context, right_alias, column_name);
 	return make_uniq<ComparisonExpression>(type, std::move(left), std::move(right));
+}
+
+static bool TryGetBoundColumnRef(Expression &expr, ColumnBinding &column_binding) {
+	auto *current = &expr;
+	while (current->GetExpressionClass() == ExpressionClass::BOUND_CAST) {
+		current = current->Cast<BoundCastExpression>().child.get();
+	}
+	if (current->GetExpressionType() != ExpressionType::BOUND_COLUMN_REF) {
+		return false;
+	}
+	column_binding = current->Cast<BoundColumnRefExpression>().binding;
+	return true;
+}
+
+static bool CollectUniqueJoinKeyColumns(Expression &expr, const unordered_set<idx_t> &left_bindings,
+                                        const unordered_set<idx_t> &right_bindings,
+                                        unordered_map<idx_t, vector<column_t>> &right_key_columns, bool &found_key) {
+	if (expr.GetExpressionType() == ExpressionType::CONJUNCTION_AND) {
+		auto &conjunction = expr.Cast<BoundConjunctionExpression>();
+		for (auto &child : conjunction.children) {
+			if (!CollectUniqueJoinKeyColumns(*child, left_bindings, right_bindings, right_key_columns, found_key)) {
+				return false;
+			}
+		}
+		return true;
+	}
+	if (expr.GetExpressionType() != ExpressionType::COMPARE_EQUAL) {
+		return true;
+	}
+	auto &comparison = expr.Cast<BoundComparisonExpression>();
+	auto left_side = JoinSide::GetJoinSide(*comparison.left, left_bindings, right_bindings);
+	auto right_side = JoinSide::GetJoinSide(*comparison.right, left_bindings, right_bindings);
+	if (!((left_side == JoinSide::LEFT && right_side == JoinSide::RIGHT) ||
+	      (left_side == JoinSide::RIGHT && right_side == JoinSide::LEFT))) {
+		return true;
+	}
+
+	found_key = true;
+	auto *right_expr = (left_side == JoinSide::RIGHT) ? comparison.left.get() : comparison.right.get();
+	ColumnBinding right_binding;
+	if (!TryGetBoundColumnRef(*right_expr, right_binding)) {
+		return false;
+	}
+	right_key_columns[right_binding.table_index].push_back(right_binding.column_index);
+	return true;
+}
+
+static string UniqueJoinColumnsToString(Binding &binding, const vector<column_t> &columns) {
+	auto &names = binding.GetColumnNames();
+	vector<string> column_names;
+	column_names.reserve(columns.size());
+	for (auto column_idx : columns) {
+		if (column_idx < names.size()) {
+			column_names.push_back(names[column_idx]);
+		} else {
+			column_names.push_back("#" + to_string(column_idx));
+		}
+	}
+	return StringUtil::Join(column_names, ", ");
+}
+
+static void ThrowUniqueJoinError(JoinRef &ref, const string &rhs_name, const string &rhs_columns) {
+	throw BinderException(ref,
+	                      "UNIQUE JOIN failed: '%s' is not provably unique on (%s). Hint: use a PRIMARY KEY, "
+	                      "UNIQUE constraint, GROUP BY, or SELECT DISTINCT.",
+	                      rhs_name, rhs_columns);
 }
 
 bool Binder::TryFindBinding(const string &using_column, const string &join_side, BindingAlias &result) {
@@ -135,6 +206,9 @@ BoundStatement Binder::Bind(JoinRef &ref) {
 	result->right_binder = Binder::CreateBinder(context, this);
 	auto &left_binder = *result->left_binder;
 	auto &right_binder = *result->right_binder;
+	unordered_set<idx_t> left_binding_indexes;
+	unordered_set<idx_t> right_binding_indexes;
+	unordered_map<idx_t, optional_ptr<Binding>> right_binding_by_index;
 
 	result->type = ref.type;
 	result->left = left_binder.BindJoin(*this, *ref.left);
@@ -303,6 +377,13 @@ BoundStatement Binder::Bind(JoinRef &ref) {
 
 	auto right_bindings = right_binder.bind_context.GetBindingAliases();
 	auto left_bindings = left_binder.bind_context.GetBindingAliases();
+	for (auto &binding : left_binder.bind_context.GetBindingsList()) {
+		left_binding_indexes.insert(binding->GetIndex());
+	}
+	for (auto &binding : right_binder.bind_context.GetBindingsList()) {
+		right_binding_indexes.insert(binding->GetIndex());
+		right_binding_by_index[binding->GetIndex()] = *binding;
+	}
 
 	bind_context.AddContext(std::move(left_binder.bind_context));
 	bind_context.AddContext(std::move(right_binder.bind_context));
@@ -335,6 +416,33 @@ BoundStatement Binder::Bind(JoinRef &ref) {
 	if (ref.condition) {
 		WhereBinder binder(*this, context);
 		result->condition = binder.Bind(ref.condition);
+	}
+
+	if (ref.is_unique) {
+		if (!result->condition) {
+			ThrowUniqueJoinError(ref, "right side", "no join key");
+		}
+		unordered_map<idx_t, vector<column_t>> right_key_columns;
+		bool found_key = false;
+		if (!CollectUniqueJoinKeyColumns(*result->condition, left_binding_indexes, right_binding_indexes,
+		                                 right_key_columns, found_key)) {
+			ThrowUniqueJoinError(ref, "right side", "unsupported join key expression");
+		}
+		if (!found_key || right_key_columns.size() != 1) {
+			ThrowUniqueJoinError(ref, "right side", "no provable right-side equality key");
+		}
+		auto &entry = *right_key_columns.begin();
+		auto right_binding_it = right_binding_by_index.find(entry.first);
+		if (right_binding_it == right_binding_by_index.end() || !right_binding_it->second) {
+			ThrowUniqueJoinError(ref, "right side", "unknown key");
+		}
+		auto &binding = *right_binding_it->second;
+		auto &column_indices = entry.second;
+		sort(column_indices.begin(), column_indices.end());
+		column_indices.erase(std::unique(column_indices.begin(), column_indices.end()), column_indices.end());
+		if (!binding.ColumnsAreUnique(column_indices)) {
+			ThrowUniqueJoinError(ref, binding.GetAlias(), UniqueJoinColumnsToString(binding, column_indices));
+		}
 	}
 
 	if (result->type == JoinType::SEMI || result->type == JoinType::ANTI || result->type == JoinType::MARK) {
