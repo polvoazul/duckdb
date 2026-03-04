@@ -67,13 +67,17 @@ static bool CollectUniqueJoinKeyColumns(Expression &expr, const unordered_set<id
 	auto &comparison = expr.Cast<BoundComparisonExpression>();
 	auto left_side = JoinSide::GetJoinSide(*comparison.left, left_bindings, right_bindings);
 	auto right_side = JoinSide::GetJoinSide(*comparison.right, left_bindings, right_bindings);
-	if (!((left_side == JoinSide::LEFT && right_side == JoinSide::RIGHT) ||
-	      (left_side == JoinSide::RIGHT && right_side == JoinSide::LEFT))) {
+	auto right_only = JoinSide::RIGHT;
+	auto left_only = JoinSide::LEFT;
+	auto none = JoinSide::NONE;
+	bool right_on_left = (left_side == right_only) && (right_side == left_only || right_side == none);
+	bool right_on_right = (right_side == right_only) && (left_side == left_only || left_side == none);
+	if (!right_on_left && !right_on_right) {
 		return true;
 	}
 
 	found_key = true;
-	auto *right_expr = (left_side == JoinSide::RIGHT) ? comparison.left.get() : comparison.right.get();
+	auto *right_expr = right_on_left ? comparison.left.get() : comparison.right.get();
 	ColumnBinding right_binding;
 	if (!TryGetBoundColumnRef(*right_expr, right_binding)) {
 		return false;

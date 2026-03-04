@@ -13,14 +13,131 @@
 #include "duckdb/planner/binder.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
 #include "duckdb/planner/operator/logical_cteref.hpp"
+#include "duckdb/planner/operator/logical_filter.hpp"
+#include "duckdb/planner/operator/logical_projection.hpp"
 #include "duckdb/planner/expression_binder/constant_binder.hpp"
 #include "duckdb/catalog/catalog_search_path.hpp"
 #include "duckdb/planner/tableref/bound_at_clause.hpp"
 #include "duckdb/execution/expression_executor.hpp"
 #include "duckdb/parser/query_node/cte_node.hpp"
 #include "duckdb/planner/operator/logical_dummy_scan.hpp"
+#include "duckdb/planner/expression/bound_cast_expression.hpp"
+#include "duckdb/planner/expression/bound_columnref_expression.hpp"
 
 namespace duckdb {
+
+static bool TryGetDirectColumnRef(Expression &expr, idx_t &table_index, idx_t &column_index) {
+	auto *current = &expr;
+	while (current->GetExpressionClass() == ExpressionClass::BOUND_CAST) {
+		current = current->Cast<BoundCastExpression>().child.get();
+	}
+	if (current->GetExpressionType() != ExpressionType::BOUND_COLUMN_REF) {
+		return false;
+	}
+	auto &colref = current->Cast<BoundColumnRefExpression>();
+	table_index = colref.binding.table_index;
+	column_index = colref.binding.column_index;
+	return true;
+}
+
+static void CollectTableUniqueKeys(TableCatalogEntry &table, vector<vector<idx_t>> &unique_keys) {
+	for (auto &constraint : table.GetConstraints()) {
+		if (constraint->type != ConstraintType::UNIQUE) {
+			continue;
+		}
+		auto &unique = constraint->Cast<UniqueConstraint>();
+		vector<LogicalIndex> constraint_indices;
+		if (unique.HasIndex()) {
+			constraint_indices.push_back(unique.GetIndex());
+		} else {
+			constraint_indices = unique.GetLogicalIndexes(table.GetColumns());
+		}
+		vector<idx_t> key;
+		key.reserve(constraint_indices.size());
+		for (auto &constraint_idx : constraint_indices) {
+			key.push_back(constraint_idx.index);
+		}
+		unique_keys.push_back(std::move(key));
+	}
+}
+
+static bool TryInferUniqueKeysFromPlan(LogicalOperator &plan, vector<vector<idx_t>> &unique_keys) {
+	LogicalOperator *current = &plan;
+	vector<unique_ptr<Expression>> *projection_exprs = nullptr;
+	while (true) {
+		if (current->type == LogicalOperatorType::LOGICAL_PROJECTION) {
+			if (projection_exprs) {
+				return false;
+			}
+			projection_exprs = &current->expressions;
+			if (current->children.size() != 1) {
+				return false;
+			}
+			current = current->children[0].get();
+			continue;
+		}
+		if (current->type == LogicalOperatorType::LOGICAL_FILTER) {
+			if (current->children.size() != 1) {
+				return false;
+			}
+			current = current->children[0].get();
+			continue;
+		}
+		break;
+	}
+	if (current->type != LogicalOperatorType::LOGICAL_GET) {
+		return false;
+	}
+	auto &get = current->Cast<LogicalGet>();
+	auto table_entry = get.GetTable();
+	if (!table_entry) {
+		return false;
+	}
+	vector<vector<idx_t>> table_keys;
+	CollectTableUniqueKeys(*table_entry, table_keys);
+	if (table_keys.empty()) {
+		return false;
+	}
+	if (!projection_exprs) {
+		unique_keys = std::move(table_keys);
+		return !unique_keys.empty();
+	}
+	unordered_map<idx_t, idx_t> col_to_output;
+	for (idx_t output_idx = 0; output_idx < projection_exprs->size(); output_idx++) {
+		idx_t table_index;
+		idx_t column_index;
+		if (!TryGetDirectColumnRef(*(*projection_exprs)[output_idx], table_index, column_index)) {
+			continue;
+		}
+		if (table_index != get.table_index) {
+			continue;
+		}
+		auto &column_ids = get.GetColumnIds();
+		if (column_index >= column_ids.size()) {
+			continue;
+		}
+		auto logical_index = column_ids[column_index].GetPrimaryIndex();
+		if (col_to_output.find(logical_index) == col_to_output.end()) {
+			col_to_output.emplace(logical_index, output_idx);
+		}
+	}
+	for (auto &key : table_keys) {
+		vector<idx_t> projected_key;
+		projected_key.reserve(key.size());
+		for (auto column_idx : key) {
+			auto it = col_to_output.find(column_idx);
+			if (it == col_to_output.end()) {
+				projected_key.clear();
+				break;
+			}
+			projected_key.push_back(it->second);
+		}
+		if (!projected_key.empty()) {
+			unique_keys.push_back(std::move(projected_key));
+		}
+	}
+	return !unique_keys.empty();
+}
 
 static bool TryLoadExtensionForReplacementScan(ClientContext &context, const string &table_name) {
 	auto lower_name = StringUtil::Lower(table_name);
@@ -337,6 +454,9 @@ BoundStatement Binder::Bind(BaseTableRef &ref) {
 		// bind the child subquery
 		view_binder->AddBoundView(view_catalog_entry);
 		auto bound_child = view_binder->Bind(subquery);
+		if (bound_child.unique_keys.empty()) {
+			TryInferUniqueKeysFromPlan(*bound_child.plan, bound_child.unique_keys);
+		}
 		if (!view_binder->correlated_columns.empty()) {
 			throw BinderException("Contents of view were altered - view bound correlated columns");
 		}

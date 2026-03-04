@@ -39,7 +39,7 @@
 %type <boolean>	all_or_distinct
 
 %type <node>	join_outer join_qual
-%type <jtype>	join_type
+%type <jtype>	join_type join_type_unique
 
 %type <list>	extract_list overlay_list position_list
 %type <list>	substr_list trim_list

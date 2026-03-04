@@ -21,7 +21,10 @@
 #include "duckdb/planner/expression/bound_cast_expression.hpp"
 #include "duckdb/planner/expression/bound_constant_expression.hpp"
 #include "duckdb/planner/expression/bound_expanded_expression.hpp"
+#include "duckdb/planner/expression/bound_comparison_expression.hpp"
+#include "duckdb/planner/expression/bound_conjunction_expression.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
+#include "duckdb/planner/expression/bound_window_expression.hpp"
 #include "duckdb/planner/expression_binder/column_alias_binder.hpp"
 #include "duckdb/planner/expression_binder/constant_binder.hpp"
 #include "duckdb/planner/expression_binder/group_binder.hpp"
@@ -32,6 +35,8 @@
 #include "duckdb/planner/expression_binder/select_binder.hpp"
 #include "duckdb/planner/expression_binder/where_binder.hpp"
 #include "duckdb/planner/query_node/bound_select_node.hpp"
+#include "duckdb/planner/column_binding_map.hpp"
+#include "duckdb/planner/operator/logical_get.hpp"
 
 namespace duckdb {
 
@@ -126,6 +131,22 @@ static void InferGroupByUniqueKey(const BoundSelectNode &node, BoundStatement &r
 	AddInferredUniqueKey(result_statement.unique_keys, std::move(key));
 }
 
+static optional_ptr<LogicalGet> FindGet(LogicalOperator &op, idx_t table_index) {
+	if (op.type == LogicalOperatorType::LOGICAL_GET) {
+		auto &get = op.Cast<LogicalGet>();
+		if (get.table_index == table_index) {
+			return &get;
+		}
+	}
+	for (auto &child : op.children) {
+		auto res = FindGet(*child, table_index);
+		if (res) {
+			return res;
+		}
+	}
+	return nullptr;
+}
+
 static void InferProjectedUniqueKeys(const BoundSelectNode &node, BoundStatement &result_statement) {
 	if (node.from_table.unique_keys.empty()) {
 		return;
@@ -142,6 +163,15 @@ static void InferProjectedUniqueKeys(const BoundSelectNode &node, BoundStatement
 			source_table = table_index;
 		} else if (source_table.GetIndex() != table_index) {
 			return;
+		}
+		if (node.from_table.plan) {
+			auto get = FindGet(*node.from_table.plan, table_index);
+			if (get) {
+				auto &column_ids = get->GetColumnIds();
+				if (column_index < column_ids.size()) {
+					column_index = column_ids[column_index].GetPrimaryIndex();
+				}
+			}
 		}
 		// keep first projection index for duplicate projections
 		if (source_col_to_output.find(column_index) == source_col_to_output.end()) {
@@ -161,6 +191,134 @@ static void InferProjectedUniqueKeys(const BoundSelectNode &node, BoundStatement
 		}
 		AddInferredUniqueKey(result_statement.unique_keys, std::move(projected_key));
 	}
+}
+
+static bool TryGetRowNumberPartitions(Expression &expr, const BoundSelectNode &node,
+                                      vector<unique_ptr<Expression>> *&partitions) {
+	if (expr.GetExpressionClass() == ExpressionClass::BOUND_WINDOW &&
+	    expr.GetExpressionType() == ExpressionType::WINDOW_ROW_NUMBER) {
+		auto &window = expr.Cast<BoundWindowExpression>();
+		if (window.partitions.empty()) {
+			return false;
+		}
+		partitions = &window.partitions;
+		return true;
+	}
+	if (expr.GetExpressionClass() != ExpressionClass::BOUND_COLUMN_REF) {
+		return false;
+	}
+	auto &colref = expr.Cast<BoundColumnRefExpression>();
+	if (colref.binding.table_index != node.window_index) {
+		return false;
+	}
+	if (colref.binding.column_index >= node.windows.size()) {
+		return false;
+	}
+	auto &window_expr = *node.windows[colref.binding.column_index];
+	if (window_expr.GetExpressionClass() != ExpressionClass::BOUND_WINDOW ||
+	    window_expr.GetExpressionType() != ExpressionType::WINDOW_ROW_NUMBER) {
+		return false;
+	}
+	auto &window = window_expr.Cast<BoundWindowExpression>();
+	if (window.partitions.empty()) {
+		return false;
+	}
+	partitions = &window.partitions;
+	return true;
+}
+
+static Expression *SkipCasts(Expression *expr) {
+	while (expr && expr->GetExpressionClass() == ExpressionClass::BOUND_CAST) {
+		expr = expr->Cast<BoundCastExpression>().child.get();
+	}
+	return expr;
+}
+
+static bool IsRowNumberEqualsOne(Expression &expr, const BoundSelectNode &node,
+                                 vector<unique_ptr<Expression>> *&partitions) {
+	if (expr.GetExpressionClass() != ExpressionClass::BOUND_COMPARISON) {
+		return false;
+	}
+	auto &comparison = expr.Cast<BoundComparisonExpression>();
+	if (comparison.type != ExpressionType::COMPARE_EQUAL) {
+		return false;
+	}
+	BoundConstantExpression *constant = nullptr;
+	auto *left = SkipCasts(comparison.left.get());
+	auto *right = SkipCasts(comparison.right.get());
+	if (right && right->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT && left &&
+	    TryGetRowNumberPartitions(*left, node, partitions)) {
+		constant = &right->Cast<BoundConstantExpression>();
+	} else if (left && left->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT && right &&
+	           TryGetRowNumberPartitions(*right, node, partitions)) {
+		constant = &left->Cast<BoundConstantExpression>();
+	}
+	if (!constant) {
+		return false;
+	}
+	if (constant->value.IsNull() || !(constant->value == 1)) {
+		return false;
+	}
+	return true;
+}
+
+static bool TryFindRowNumberPartitions(Expression &expr, const BoundSelectNode &node,
+                                       vector<unique_ptr<Expression>> *&partitions) {
+	if (IsRowNumberEqualsOne(expr, node, partitions)) {
+		return true;
+	}
+	if (expr.GetExpressionClass() != ExpressionClass::BOUND_CONJUNCTION) {
+		return false;
+	}
+	auto &conjunction = expr.Cast<BoundConjunctionExpression>();
+	if (conjunction.type != ExpressionType::CONJUNCTION_AND) {
+		return false;
+	}
+	for (auto &child : conjunction.children) {
+		if (TryFindRowNumberPartitions(*child, node, partitions)) {
+			return true;
+		}
+	}
+	return false;
+}
+
+static void InferQualifyRowNumberUniqueKey(const BoundSelectNode &node, BoundStatement &result_statement) {
+	if (!node.qualify) {
+		return;
+	}
+	vector<unique_ptr<Expression>> *partitions = nullptr;
+	if (!TryFindRowNumberPartitions(*node.qualify, node, partitions)) {
+		return;
+	}
+	column_binding_map_t<idx_t> output_bindings;
+	for (idx_t output_idx = 0; output_idx < node.column_count; output_idx++) {
+		idx_t table_index;
+		idx_t column_index;
+		if (!TryGetDirectColumnRef(*node.select_list[output_idx], table_index, column_index)) {
+			continue;
+		}
+		ColumnBinding binding(table_index, column_index);
+		if (output_bindings.find(binding) == output_bindings.end()) {
+			output_bindings.emplace(binding, output_idx);
+		}
+	}
+
+	vector<idx_t> key;
+	key.reserve(partitions->size());
+	for (auto &partition_expr : *partitions) {
+		idx_t table_index;
+		idx_t column_index;
+		if (!TryGetDirectColumnRef(*partition_expr, table_index, column_index)) {
+			return;
+		}
+		ColumnBinding binding(table_index, column_index);
+		auto it = output_bindings.find(binding);
+		if (it == output_bindings.end()) {
+			return;
+		}
+		key.push_back(it->second);
+	}
+	AddInferredUniqueKey(result_statement.unique_keys, std::move(key));
 }
 
 unique_ptr<Expression> Binder::BindOrderExpression(OrderBinder &order_binder, unique_ptr<ParsedExpression> expr) {
@@ -834,6 +992,7 @@ BoundStatement Binder::BindSelectNode(SelectNode &statement, BoundStatement from
 	InferProjectedUniqueKeys(result, result_statement);
 	InferGroupByUniqueKey(result, result_statement);
 	InferDistinctUniqueKey(result, result_statement);
+	InferQualifyRowNumberUniqueKey(result, result_statement);
 	result_statement.plan = CreatePlan(result);
 	result_statement.extra_info.original_expressions = std::move(result.bind_state.original_expressions);
 	return result_statement;

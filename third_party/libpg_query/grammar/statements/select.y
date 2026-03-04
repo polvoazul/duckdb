@@ -1432,7 +1432,7 @@ joined_table:
                    n->location = @2;
                    $$ = n;
                }
-			| table_ref UNIQUE join_type JOIN table_ref join_qual
+			| table_ref UNIQUE join_type_unique JOIN table_ref join_qual
 				{
 					PGJoinExpr *n = makeNode(PGJoinExpr);
 					n->jointype = $3;
@@ -1462,7 +1462,7 @@ joined_table:
 					n->location = @2;
 					$$ = n;
 				}
-			| table_ref NATURAL UNIQUE join_type JOIN table_ref
+			| table_ref NATURAL UNIQUE join_type_unique JOIN table_ref
 				{
 					PGJoinExpr *n = makeNode(PGJoinExpr);
 					n->jointype = $4;
@@ -1488,7 +1488,7 @@ joined_table:
 					n->location = @2;
 					$$ = n;
 				}
-			| table_ref ASOF UNIQUE join_type JOIN table_ref join_qual
+			| table_ref ASOF UNIQUE join_type_unique JOIN table_ref join_qual
 				{
 					PGJoinExpr *n = makeNode(PGJoinExpr);
 					n->jointype = $4;
@@ -1585,6 +1585,12 @@ join_type:	FULL join_outer							{ $$ = PG_JOIN_FULL; }
 			| RIGHT join_outer						{ $$ = PG_JOIN_RIGHT; }
 			| SEMI          						{ $$ = PG_JOIN_SEMI; }
 			| ANTI          						{ $$ = PG_JOIN_ANTI; }
+			| INNER_P								{ $$ = PG_JOIN_INNER; }
+		;
+
+join_type_unique:	FULL join_outer					{ $$ = PG_JOIN_FULL; }
+			| LEFT join_outer						{ $$ = PG_JOIN_LEFT; }
+			| RIGHT join_outer						{ $$ = PG_JOIN_RIGHT; }
 			| INNER_P								{ $$ = PG_JOIN_INNER; }
 		;
 

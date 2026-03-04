@@ -1,103 +1,144 @@
-# name: test/sql/join/inner/test_unique_join.test
+# name: test/sql/join/unique/test_unique_join.test
 # description: Test UNIQUE JOIN bind-time uniqueness assertions
-# group: [inner]
+# group: [unique]
+
+# ------------------------------------------------------------------------------
+# Fixtures
+# ------------------------------------------------------------------------------
 
 statement ok
 PRAGMA enable_verification
 
 statement ok
-CREATE TABLE uj_customers (id INTEGER PRIMARY KEY, name VARCHAR, active BOOLEAN);
+CREATE TABLE uj_users (id INTEGER PRIMARY KEY, name VARCHAR);
 
 statement ok
-CREATE TABLE uj_users (id INTEGER UNIQUE, email VARCHAR);
-
-statement ok
-CREATE TABLE uj_orders (o_id INTEGER, line INTEGER, customer_id INTEGER, user_id INTEGER, amount INTEGER);
-
-statement ok
-CREATE TABLE uj_order_items (order_id INTEGER, line INTEGER, qty INTEGER, PRIMARY KEY (order_id, line));
+CREATE TABLE uj_orders (order_id INTEGER, user_id INTEGER, qty INTEGER, PRIMARY KEY (order_id, user_id));
 
 statement ok
 CREATE TABLE uj_sessions (user_id INTEGER, ts TIMESTAMP);
 
 statement ok
-CREATE TABLE uj_events (user_id INTEGER, ts TIMESTAMP);
+INSERT INTO uj_users VALUES (1, 'alice'), (2, 'bob');
 
 statement ok
-INSERT INTO uj_customers VALUES (1, 'alice', true), (2, 'bob', true);
+INSERT INTO uj_orders VALUES (1, 1, 30), (1, 2, 20), (2, 1, 10);
 
 statement ok
-INSERT INTO uj_users VALUES (101, 'a@example.com'), (102, 'b@example.com');
+INSERT INTO uj_sessions VALUES (1, '2024-01-01'), (1, '2024-01-02'), (2, '2024-01-01');
 
-statement ok
-INSERT INTO uj_orders VALUES
-	(10, 1, 1, 101, 5),
-	(10, 2, 1, 101, 7),
-	(11, 1, 2, 102, 9),
-	(12, 1, NULL, NULL, 1);
+# ------------------------------------------------------------------------------
+# Happy paths
+# ------------------------------------------------------------------------------
+# We only assert RHS uniqueness. These should all bind and run.
 
-statement ok
-INSERT INTO uj_order_items VALUES (10, 1, 1), (10, 2, 1), (11, 1, 2), (12, 1, 1);
-
-statement ok
-INSERT INTO uj_sessions VALUES (101, '2024-01-01'), (101, '2024-01-02'), (102, '2024-01-01');
-
-statement ok
-INSERT INTO uj_events VALUES (101, '2024-01-01'), (101, '2024-01-05'), (102, '2024-01-03');
-
+# Single-column PK on RHS
 query I
-SELECT COUNT(*) FROM uj_orders UNIQUE JOIN uj_customers ON uj_orders.customer_id = uj_customers.id;
+SELECT COUNT(*)
+FROM uj_sessions
+UNIQUE JOIN uj_users
+	ON uj_sessions.user_id = uj_users.id;
 ----
 3
 
+# Composite PK on RHS (all key columns in join predicate)
 query I
-SELECT COUNT(*) FROM uj_orders UNIQUE LEFT JOIN uj_users ON uj_orders.user_id = uj_users.id;
-----
-4
-
-query I
-SELECT COUNT(*) FROM uj_orders UNIQUE INNER JOIN uj_order_items
-ON uj_orders.o_id = uj_order_items.order_id AND uj_orders.line = uj_order_items.line;
-----
-4
-
-statement error
-SELECT * FROM uj_orders UNIQUE INNER JOIN uj_order_items ON uj_orders.o_id = uj_order_items.order_id;
-----
-UNIQUE JOIN failed
-
-statement error
-SELECT * FROM uj_orders UNIQUE INNER JOIN uj_sessions ON uj_orders.user_id = uj_sessions.user_id;
-----
-UNIQUE JOIN failed
-
-query I
-SELECT COUNT(*) FROM uj_orders UNIQUE INNER JOIN (
-	SELECT customer_id, SUM(amount) AS total
-	FROM uj_orders
-	GROUP BY customer_id
-) t ON uj_orders.customer_id = t.customer_id;
+SELECT COUNT(*)
+FROM uj_sessions
+UNIQUE INNER JOIN uj_orders
+	ON uj_sessions.user_id = uj_orders.user_id AND uj_orders.order_id = 1;
 ----
 3
 
+# GROUP BY makes RHS unique on the grouping key
 query I
-SELECT COUNT(*) FROM uj_orders UNIQUE INNER JOIN (
+SELECT COUNT(*) FROM uj_sessions UNIQUE INNER JOIN (
+	SELECT user_id, MAX(ts) AS max_ts
+	FROM uj_sessions
+	GROUP BY user_id
+) t ON uj_sessions.user_id = t.user_id;
+----
+3
+
+# SELECT DISTINCT makes RHS unique on all output columns
+query I
+SELECT COUNT(*) FROM uj_sessions UNIQUE INNER JOIN (
 	SELECT DISTINCT user_id
-	FROM uj_events
-) e ON uj_orders.user_id = e.user_id;
+	FROM uj_sessions
+) e ON uj_sessions.user_id = e.user_id;
 ----
 3
 
+# QUALIFY row_number() = 1 makes RHS unique over PARTITION BY keys
+query I
+SELECT COUNT(*) FROM uj_sessions UNIQUE INNER JOIN (
+	SELECT user_id
+	FROM uj_sessions
+	QUALIFY row_number() OVER (PARTITION BY user_id ORDER BY ts) = 1
+) s ON uj_sessions.user_id = s.user_id;
+----
+3
+
+# View over PK table preserves uniqueness
+# Also LEFT JOIN should not affect uniqueness
+statement ok
+CREATE VIEW uj_active_customers AS SELECT id FROM uj_users where name = 'bob';
+
+query I
+SELECT COUNT(*)
+FROM uj_sessions UNIQUE LEFT JOIN uj_active_customers
+	ON uj_sessions.user_id = uj_active_customers.id;
+----
+3
+
+
+# ------------------------------------------------------------------------------
+# Unhappy paths
+# ------------------------------------------------------------------------------
+# These should fail to bind or parse due to missing uniqueness guarantees.
+
+# Composite PK but only one column in join predicate
 statement error
-SELECT * FROM uj_orders UNIQUE INNER JOIN (
-	SELECT user_id, ts FROM uj_sessions
-) s ON uj_orders.user_id = s.user_id;
+SELECT * FROM uj_sessions UNIQUE INNER JOIN uj_orders ON uj_sessions.user_id = uj_orders.order_id;
 ----
 UNIQUE JOIN failed
 
-query I
-WITH a AS (SELECT id, name FROM uj_customers),
-     b AS (SELECT id, UPPER(name) AS name FROM a)
-SELECT COUNT(*) FROM uj_orders UNIQUE INNER JOIN b ON uj_orders.customer_id = b.id;
+# No uniqueness constraint on RHS
+statement error
+SELECT * FROM uj_sessions UNIQUE INNER JOIN uj_sessions s2 ON uj_sessions.user_id = s2.user_id;
 ----
-3
+UNIQUE JOIN failed
+
+# GROUP BY includes extra column not selected => output not unique
+statement error
+SELECT * FROM uj_sessions UNIQUE INNER JOIN (
+	SELECT user_id FROM uj_sessions
+	GROUP BY user_id, ts
+) g ON uj_sessions.user_id = g.user_id;
+----
+UNIQUE JOIN failed
+
+# RHS subquery with no uniqueness guarantee (nested)
+statement error
+SELECT * FROM uj_sessions UNIQUE INNER JOIN (
+	SELECT user_id
+	FROM (SELECT user_id, ts FROM uj_sessions) s
+) t ON uj_sessions.user_id = t.user_id;
+----
+UNIQUE JOIN failed
+
+# View with no uniqueness guarantee
+statement ok
+CREATE VIEW uj_sessions_view AS SELECT user_id, ts FROM uj_sessions;
+
+statement error
+SELECT * FROM uj_sessions UNIQUE INNER JOIN uj_sessions_view
+ON uj_sessions.user_id = uj_sessions_view.user_id;
+----
+UNIQUE JOIN failed
+
+# UNIQUE must not be allowed on ANTI joins
+statement error
+SELECT * FROM uj_sessions UNIQUE ANTI JOIN uj_users ON uj_sessions.user_id = uj_users.id;
+----
+Parser Error
